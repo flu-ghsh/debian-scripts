@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+CHRONY_CONF="/etc/chrony/chrony.conf"
+
+if [[ $EUID -ne 0 ]]; then
+    echo "Запустите скрипт от root:"
+    echo "sudo $0"
+    exit 1
+fi
+
+read -r -p "Введите IP-адрес или имя NTP-сервера: " NTP_SERVER
+
+if [[ -z "$NTP_SERVER" ]]; then
+    echo "Ошибка: адрес NTP-сервера не указан."
+    exit 1
+fi
+
+echo
+echo "Проверяю доступность NTP-сервера: $NTP_SERVER"
+
+if ! getent hosts "$NTP_SERVER" >/dev/null 2>&1; then
+    echo "Предупреждение: не удалось разрешить или проверить адрес $NTP_SERVER."
+    read -r -p "Продолжить? [y/N]: " ANSWER
+
+    if [[ ! "$ANSWER" =~ ^[YyДд]$ ]]; then
+        exit 1
+    fi
+fi
+
+echo "Устанавливаю chrony..."
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y chrony
+
+if [[ ! -f "$CHRONY_CONF" ]]; then
+    echo "Ошибка: файл $CHRONY_CONF не найден."
+    exit 1
+fi
+
+BACKUP="${CHRONY_CONF}.backup.$(date +%Y%m%d-%H%M%S)"
+cp -a "$CHRONY_CONF" "$BACKUP"
+
+echo "Резервная копия конфигурации: $BACKUP"
+
+# Комментируем существующие активные server и pool.
+sed -i -E \
+    -e 's/^[[:space:]]*(server[[:space:]]+)/# disabled by ntp-setup: \1/' \
+    -e 's/^[[:space:]]*(pool[[:space:]]+)/# disabled by ntp-setup: \1/' \
+    "$CHRONY_CONF"
+
+# Удаляем ранее добавленный этим скриптом блок.
+sed -i \
+    '/^# BEGIN MANAGED NTP SERVER$/,/^# END MANAGED NTP SERVER$/d' \
+    "$CHRONY_CONF"
+
+cat >> "$CHRONY_CONF" <<EOF
+
+# BEGIN MANAGED NTP SERVER
+server $NTP_SERVER iburst prefer
+makestep 1.0 3
+# END MANAGED NTP SERVER
+EOF
+
+echo "Включаю и перезапускаю chrony..."
+systemctl enable chrony
+systemctl restart chrony
+
+echo "Запрашиваю несколько измерений времени..."
+chronyc -a burst 4/4 || true
+sleep 3
+
+echo "Принудительно корректирую системное время..."
+chronyc -a makestep || true
+
+echo
+echo "Текущий статус:"
+chronyc tracking || true
+
+echo
+echo "Источники времени:"
+chronyc sources -v || true
+
+echo
+echo "Настройка завершена."
+echo "Основной NTP-сервер: $NTP_SERVER"
+echo "В выводе sources символ ^* означает выбранный источник."
