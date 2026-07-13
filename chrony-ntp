@@ -5,88 +5,94 @@ set -euo pipefail
 
 CHRONY_CONF="/etc/chrony/chrony.conf"
 
-# Цвета, хорошо видимые на чёрном фоне
-if [[ -t 1 ]]; then
-    RESET='\033[0m'
-    BOLD='\033[1m'
-    RED='\033[1;91m'
-    GREEN='\033[1;92m'
-    YELLOW='\033[1;93m'
-    BLUE='\033[1;94m'
-    MAGENTA='\033[1;95m'
-    CYAN='\033[1;96m'
-    WHITE='\033[1;97m'
-    GRAY='\033[0;90m'
-else
-    RESET=''
-    BOLD=''
-    RED=''
-    GREEN=''
-    YELLOW=''
-    BLUE=''
-    MAGENTA=''
-    CYAN=''
-    WHITE=''
-    GRAY=''
-fi
+# Принудительные ANSI-цвета.
+# Не используем проверку [[ -t 1 ]], так как при запуске через curl
+# она иногда ошибочно отключает цветной вывод.
+RESET=$'\033[0m'
+BOLD=$'\033[1m'
+
+RED=$'\033[1;91m'
+GREEN=$'\033[1;92m'
+YELLOW=$'\033[1;93m'
+BLUE=$'\033[1;94m'
+MAGENTA=$'\033[1;95m'
+CYAN=$'\033[1;96m'
+WHITE=$'\033[1;97m'
+GRAY=$'\033[0;90m'
 
 info() {
-    printf "${CYAN}➜ %s${RESET}\n" "$*"
+    printf '%b\n' "${CYAN}➜ $*${RESET}"
 }
 
 success() {
-    printf "${GREEN}✔ %s${RESET}\n" "$*"
+    printf '%b\n' "${GREEN}✔ $*${RESET}"
 }
 
 warning() {
-    printf "${YELLOW}⚠ %s${RESET}\n" "$*"
+    printf '%b\n' "${YELLOW}⚠ $*${RESET}"
 }
 
 error() {
-    printf "${RED}✖ %s${RESET}\n" "$*" >&2
+    printf '%b\n' "${RED}✖ $*${RESET}" >&2
 }
 
 section() {
-    printf "\n${MAGENTA}${BOLD}════════════════════════════════════════════════════════════${RESET}\n"
-    printf "${MAGENTA}${BOLD}  %s${RESET}\n" "$*"
-    printf "${MAGENTA}${BOLD}════════════════════════════════════════════════════════════${RESET}\n"
+    printf '\n%b\n' \
+        "${MAGENTA}${BOLD}════════════════════════════════════════════════════════════${RESET}"
+    printf '%b\n' "${MAGENTA}${BOLD}  $*${RESET}"
+    printf '%b\n' \
+        "${MAGENTA}${BOLD}════════════════════════════════════════════════════════════${RESET}"
 }
 
+cleanup_on_error() {
+    local exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        printf '\n'
+        error "Выполнение скрипта прервано с кодом: $exit_code"
+    fi
+}
+
+trap cleanup_on_error EXIT
+
 if [[ $EUID -ne 0 ]]; then
-    error "Скрипт необходимо запустить от root."
-    printf "${WHITE}Пример:${RESET} sudo bash %s\n" "$0"
+    error "Скрипт необходимо запускать от пользователя root."
+    printf '%b\n' "${WHITE}Пример:${RESET} sudo bash $0"
     exit 1
 fi
 
 section "Настройка синхронизации времени Chrony"
 
-printf "${CYAN}Введите IP-адрес или имя NTP-сервера:${RESET} "
+printf '%b' "${CYAN}Введите IP-адрес или имя NTP-сервера:${RESET} "
 read -r NTP_SERVER
+
+NTP_SERVER="${NTP_SERVER//[[:space:]]/}"
 
 if [[ -z "$NTP_SERVER" ]]; then
     error "Адрес NTP-сервера не указан."
     exit 1
 fi
 
-section "Проверка адреса"
+section "Проверка адреса NTP-сервера"
 
 info "Проверяю адрес: ${WHITE}${NTP_SERVER}${RESET}"
 
-# Если введён IPv4-адрес, не пытаемся искать для него PTR-запись в DNS.
+# Если введён IPv4, проверяем числа в октетах.
+# getent для IP не используем, потому что он может требовать PTR-запись.
 if [[ "$NTP_SERVER" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    IFS='.' read -r o1 o2 o3 o4 <<< "$NTP_SERVER"
+    IFS='.' read -r OCTET1 OCTET2 OCTET3 OCTET4 <<< "$NTP_SERVER"
 
-    if (( o1 > 255 || o2 > 255 || o3 > 255 || o4 > 255 )); then
-        error "Некорректный IPv4-адрес: $NTP_SERVER"
+    if (( OCTET1 > 255 || OCTET2 > 255 || OCTET3 > 255 || OCTET4 > 255 )); then
+        error "Указан некорректный IPv4-адрес: $NTP_SERVER"
         exit 1
     fi
 
     success "Указан корректный IPv4-адрес."
 else
-    info "Проверяю имя сервера через DNS..."
+    info "Проверяю DNS-разрешение имени..."
 
     if ! getent ahosts "$NTP_SERVER" >/dev/null 2>&1; then
-        error "Имя $NTP_SERVER не разрешается через DNS."
+        error "Имя ${NTP_SERVER} не разрешается через DNS."
         exit 1
     fi
 
@@ -97,7 +103,7 @@ info "Проверяю маршрут до NTP-сервера..."
 
 if ROUTE_INFO="$(ip route get "$NTP_SERVER" 2>/dev/null | head -n 1)"; then
     success "Маршрут найден:"
-    printf "${GRAY}%s${RESET}\n" "$ROUTE_INFO"
+    printf '%b\n' "${GRAY}${ROUTE_INFO}${RESET}"
 else
     warning "Не удалось определить маршрут до $NTP_SERVER."
     warning "Настройка будет продолжена."
@@ -105,39 +111,56 @@ fi
 
 section "Установка Chrony"
 
-if command -v chronyd >/dev/null 2>&1; then
+if command -v chronyd >/dev/null 2>&1 &&
+   command -v chronyc >/dev/null 2>&1; then
     success "Chrony уже установлен."
 else
-    info "Устанавливаю пакет chrony..."
-
+    info "Обновляю список пакетов..."
     apt-get update
+
+    info "Устанавливаю Chrony..."
     DEBIAN_FRONTEND=noninteractive apt-get install -y chrony
 
-    success "Chrony установлен."
+    success "Chrony успешно установлен."
 fi
 
 if [[ ! -f "$CHRONY_CONF" ]]; then
-    error "Файл конфигурации не найден: $CHRONY_CONF"
+    error "Файл конфигурации не найден:"
+    printf '%b\n' "${WHITE}${CHRONY_CONF}${RESET}"
     exit 1
 fi
 
-section "Изменение конфигурации"
+section "Настройка конфигурации"
 
 BACKUP="${CHRONY_CONF}.backup.$(date +%Y%m%d-%H%M%S)"
+
 cp -a "$CHRONY_CONF" "$BACKUP"
 
 success "Создана резервная копия:"
-printf "${WHITE}%s${RESET}\n" "$BACKUP"
+printf '%b\n' "${WHITE}${BACKUP}${RESET}"
 
-# Удаляем блок, ранее созданный этим скриптом.
+# Удаляем блок, ранее добавленный этим скриптом.
 sed -i \
     '/^# BEGIN MANAGED NTP SERVER$/,/^# END MANAGED NTP SERVER$/d' \
     "$CHRONY_CONF"
 
-# Комментируем существующие активные директивы server и pool.
+# Восстанавливаем строки, которые могли быть отключены предыдущим
+# запуском скрипта. После этого снова отключаем все активные server/pool.
 sed -i -E \
-    -e '/^[[:space:]]*#/! s|^[[:space:]]*(server[[:space:]]+)|# disabled by ntp-setup: \1|' \
-    -e '/^[[:space:]]*#/! s|^[[:space:]]*(pool[[:space:]]+)|# disabled by ntp-setup: \1|' \
+    's|^[[:space:]]*# disabled by ntp-setup: (server[[:space:]]+)|\1|' \
+    "$CHRONY_CONF"
+
+sed -i -E \
+    's|^[[:space:]]*# disabled by ntp-setup: (pool[[:space:]]+)|\1|' \
+    "$CHRONY_CONF"
+
+# Комментируем существующие активные server и pool.
+sed -i -E \
+    '/^[[:space:]]*#/! s|^[[:space:]]*(server[[:space:]]+)|# disabled by ntp-setup: \1|' \
+    "$CHRONY_CONF"
+
+sed -i -E \
+    '/^[[:space:]]*#/! s|^[[:space:]]*(pool[[:space:]]+)|# disabled by ntp-setup: \1|' \
     "$CHRONY_CONF"
 
 cat >> "$CHRONY_CONF" <<EOF
@@ -148,100 +171,120 @@ makestep 1.0 -1
 # END MANAGED NTP SERVER
 EOF
 
-success "NTP-сервер добавлен в конфигурацию:"
-printf "${WHITE}server %s iburst prefer${RESET}\n" "$NTP_SERVER"
+success "В конфигурацию добавлен NTP-сервер:"
+printf '%b\n' "${WHITE}server ${NTP_SERVER} iburst prefer${RESET}"
 
 info "Проверяю синтаксис конфигурации..."
 
 if ! chronyd -p -f "$CHRONY_CONF" >/dev/null 2>&1; then
     error "В конфигурации Chrony обнаружена ошибка."
-    warning "Восстанавливаю резервную копию."
+    warning "Восстанавливаю резервную копию..."
 
     cp -a "$BACKUP" "$CHRONY_CONF"
 
-    error "Исходная конфигурация восстановлена."
+    success "Исходная конфигурация восстановлена."
     exit 1
 fi
 
-success "Конфигурация корректна."
+success "Конфигурация Chrony корректна."
 
-section "Запуск Chrony"
+section "Запуск службы Chrony"
 
 info "Включаю автоматический запуск службы..."
-systemctl enable chrony >/dev/null
+systemctl enable chrony >/dev/null 2>&1
 
-info "Перезапускаю Chrony..."
+info "Перезапускаю службу Chrony..."
 systemctl restart chrony
 
 if systemctl is-active --quiet chrony; then
     success "Служба Chrony успешно запущена."
 else
     error "Служба Chrony не запустилась."
-    printf "${YELLOW}Последние сообщения журнала:${RESET}\n"
-    journalctl -u chrony -n 20 --no-pager
+
+    printf '\n%b\n' "${YELLOW}Последние сообщения журнала:${RESET}"
+    journalctl -u chrony -n 30 --no-pager || true
+
     exit 1
 fi
 
 section "Синхронизация времени"
 
 info "Запрашиваю быстрые измерения у ${WHITE}${NTP_SERVER}${RESET}..."
+
 chronyc burst 4/4 >/dev/null 2>&1 || true
 
-info "Ожидаю, пока Chrony получит достаточно данных..."
+info "Ожидаю получения данных от NTP-сервера..."
 
 SYNC_OK=0
 SOURCE_STATE=""
 REACH="0"
 
-for attempt in {1..15}; do
+for ATTEMPT in $(seq 1 20); do
     SOURCE_LINE="$(
         chronyc -n sources 2>/dev/null |
         awk -v server="$NTP_SERVER" '$2 == server {print; exit}'
     )"
 
-    SOURCE_STATE="$(
-        awk '{print substr($1,2,1)}' <<< "$SOURCE_LINE"
-    )"
+    if [[ -n "$SOURCE_LINE" ]]; then
+        SOURCE_STATE="$(
+            awk '{print substr($1,2,1)}' <<< "$SOURCE_LINE"
+        )"
 
-    REACH="$(
-        awk '{print $5}' <<< "$SOURCE_LINE"
-    )"
+        REACH="$(
+            awk '{print $5}' <<< "$SOURCE_LINE"
+        )"
+    else
+        SOURCE_STATE=""
+        REACH="0"
+    fi
 
     case "$SOURCE_STATE" in
         '*')
-            printf "${GREEN}✔ Попытка %02d/15: сервер выбран основным, Reach=%s${RESET}\n" \
-                "$attempt" "${REACH:-0}"
+            printf '%b\n' \
+                "${GREEN}✔ Попытка $(printf '%02d' "$ATTEMPT")/20: сервер выбран основным, Reach=${REACH}${RESET}"
             SYNC_OK=1
             break
             ;;
-        '+'|'-')
-            printf "${YELLOW}● Попытка %02d/15: сервер отвечает, состояние=%s, Reach=%s${RESET}\n" \
-                "$attempt" "$SOURCE_STATE" "${REACH:-0}"
+
+        '+')
+            printf '%b\n' \
+                "${GREEN}✔ Попытка $(printf '%02d' "$ATTEMPT")/20: сервер пригоден, Reach=${REACH}${RESET}"
             SYNC_OK=1
             break
             ;;
+
+        '-')
+            printf '%b\n' \
+                "${YELLOW}● Попытка $(printf '%02d' "$ATTEMPT")/20: сервер отвечает, Reach=${REACH}${RESET}"
+            SYNC_OK=1
+            break
+            ;;
+
         '?')
-            printf "${YELLOW}● Попытка %02d/15: данных пока недостаточно, Reach=%s${RESET}\n" \
-                "$attempt" "${REACH:-0}"
+            printf '%b\n' \
+                "${YELLOW}● Попытка $(printf '%02d' "$ATTEMPT")/20: данных пока недостаточно, Reach=${REACH}${RESET}"
             ;;
+
         'x')
-            printf "${RED}● Попытка %02d/15: источник может содержать ошибочное время, Reach=%s${RESET}\n" \
-                "$attempt" "${REACH:-0}"
+            printf '%b\n' \
+                "${RED}● Попытка $(printf '%02d' "$ATTEMPT")/20: время источника может быть ошибочным, Reach=${REACH}${RESET}"
             ;;
+
         '~')
-            printf "${YELLOW}● Попытка %02d/15: время сервера нестабильно, Reach=%s${RESET}\n" \
-                "$attempt" "${REACH:-0}"
+            printf '%b\n' \
+                "${YELLOW}● Попытка $(printf '%02d' "$ATTEMPT")/20: время источника нестабильно, Reach=${REACH}${RESET}"
             ;;
+
         *)
-            printf "${GRAY}● Попытка %02d/15: ожидаю ответ сервера, Reach=%s${RESET}\n" \
-                "$attempt" "${REACH:-0}"
+            printf '%b\n' \
+                "${GRAY}● Попытка $(printf '%02d' "$ATTEMPT")/20: ожидаю ответ сервера, Reach=${REACH}${RESET}"
             ;;
     esac
 
     sleep 2
 done
 
-printf "\n"
+printf '\n'
 
 if [[ "$SYNC_OK" -eq 1 ]]; then
     info "Выполняю принудительную коррекцию системного времени..."
@@ -249,57 +292,68 @@ if [[ "$SYNC_OK" -eq 1 ]]; then
     if chronyc makestep >/dev/null 2>&1; then
         success "Команда коррекции времени выполнена."
     else
-        warning "Не удалось выполнить chronyc makestep."
+        warning "Не удалось выполнить команду chronyc makestep."
     fi
 
-    sleep 2
+    sleep 3
 else
-    warning "Chrony пока не признал сервер пригодным для синхронизации."
+    warning "Chrony пока не признал сервер пригодным."
     warning "Проверьте UDP-порт 123, маршрутизацию и настройки NTP-сервера."
 fi
 
 section "Результат"
 
-printf "${CYAN}${BOLD}Текущее системное время:${RESET}\n"
-printf "${WHITE}%s${RESET}\n\n" "$(date)"
+printf '%b\n' "${CYAN}${BOLD}Текущее системное время:${RESET}"
+printf '%b\n\n' "${WHITE}$(date)${RESET}"
 
-printf "${CYAN}${BOLD}Состояние синхронизации:${RESET}\n"
+printf '%b\n' "${CYAN}${BOLD}Состояние синхронизации:${RESET}"
 chronyc tracking || true
 
-printf "\n${CYAN}${BOLD}Источники времени:${RESET}\n"
+printf '\n%b\n' "${CYAN}${BOLD}Источники времени:${RESET}"
 chronyc sources -v || true
-
-printf "\n"
 
 FINAL_STATE="$(
     chronyc -n sources 2>/dev/null |
     awk -v server="$NTP_SERVER" '$2 == server {print substr($1,2,1); exit}'
 )"
 
+printf '\n'
+
 case "$FINAL_STATE" in
     '*')
         success "Синхронизация выполнена успешно."
-        success "Основной NTP-сервер: ${WHITE}${NTP_SERVER}${RESET}"
+        success "Основной NTP-сервер: ${WHITE}${NTP_SERVER}${GREEN}"
         ;;
+
     '+')
-        warning "Сервер отвечает, но пока не выбран основным источником."
+        success "NTP-сервер отвечает и пригоден для синхронизации."
+        warning "Сервер пока отображается как дополнительный источник."
         ;;
+
     '-')
-        warning "Сервер отвечает, но Chrony пока не использует его для объединения времени."
+        warning "NTP-сервер отвечает, но пока не выбран основным."
         ;;
+
     '?')
         warning "Сервер добавлен, но данных для синхронизации пока недостаточно."
         ;;
+
     'x')
-        error "Chrony считает время этого источника потенциально ошибочным."
+        error "Chrony считает время NTP-сервера потенциально ошибочным."
         ;;
+
     '~')
-        warning "Chrony считает время источника слишком нестабильным."
+        warning "Chrony считает время NTP-сервера нестабильным."
         ;;
+
     *)
         warning "Не удалось определить итоговое состояние NTP-сервера."
         ;;
 esac
 
-printf "\n${GRAY}Обозначения: ^* — основной источник, ^? — источник пока непригоден.${RESET}\n"
+printf '\n%b\n' \
+    "${GRAY}Обозначения: ^* — основной источник, ^? — источник пока непригоден.${RESET}"
+
+trap - EXIT
+exit 0
 ```
