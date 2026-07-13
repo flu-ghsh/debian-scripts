@@ -226,3 +226,4 @@ if [[ "$FINAL_STATE" == "*" ]]; then
 else
     warning "Текущий статус источника: ^${FINAL_STATE:-?}"
 fi
+
